@@ -62,6 +62,10 @@ class CephFSNativeDriver(object):
             conf.write("[global]\n")
             conf.write("mon_host = " + mons + "\n")
             conf.write("auth_client_required = cephx,none\n")
+            if os.environ.get('CEPHX_NO_SIGN'):
+                conf.write("cephx_require_signatures = false\n")
+                conf.write("cephx_cluster_require_signatures = false\n")
+                conf.write("cephx_sign_messages = false\n")
             conf.close()
         return conf_path
 

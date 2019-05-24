@@ -27,8 +27,8 @@ import (
 	"strconv"
 	"strings"
 
-	"github.com/kubernetes-sigs/sig-storage-lib-external-provisioner/controller"
-	"github.com/kubernetes-sigs/sig-storage-lib-external-provisioner/util"
+	"sigs.k8s.io/sig-storage-lib-external-provisioner/controller"
+	"sigs.k8s.io/sig-storage-lib-external-provisioner/util"
 	"k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/util/uuid"
@@ -119,7 +119,7 @@ func (p *cephFSProvisioner) Provision(options controller.VolumeOptions) (*v1.Per
 	if options.PVC.Spec.Selector != nil {
 		return nil, fmt.Errorf("claim Selector is not supported")
 	}
-	cluster, adminID, adminSecret, pvcRoot, mon, deterministicNames, err := p.parseParameters(options.Parameters)
+	cluster, adminID, adminSecret, pvcRoot, mon, deterministicNames, disableSignatures, err := p.parseParameters(options.Parameters)
 	if err != nil {
 		return nil, err
 	}
@@ -154,6 +154,9 @@ func (p *cephFSProvisioner) Provision(options controller.VolumeOptions) (*v1.Per
 	}
 	if *disableCephNamespaceIsolation {
 		cmd.Env = append(cmd.Env, "CEPH_NAMESPACE_ISOLATION_DISABLED=true")
+	}
+	if disableSignatures {
+		cmd.Env = append(cmd.Env, "CEPHX_NO_SIGN=true")
 	}
 
 	output, cmdErr := cmd.CombinedOutput()
@@ -190,6 +193,10 @@ func (p *cephFSProvisioner) Provision(options controller.VolumeOptions) (*v1.Per
 		return nil, fmt.Errorf("failed to create secret")
 	}
 
+	mountOptions := options.MountOptions
+	if disableSignatures {
+		mountOptions = append(mountOptions, "nocephx_require_signatures", "nocephx_sign_messages")
+	}
 	pv := &v1.PersistentVolume{
 		ObjectMeta: metav1.ObjectMeta{
 			Name: options.PVName,
@@ -201,7 +208,7 @@ func (p *cephFSProvisioner) Provision(options controller.VolumeOptions) (*v1.Per
 		Spec: v1.PersistentVolumeSpec{
 			PersistentVolumeReclaimPolicy: options.PersistentVolumeReclaimPolicy,
 			AccessModes:                   options.PVC.Spec.AccessModes,
-			MountOptions:                  options.MountOptions,
+			MountOptions:                  mountOptions,
 			Capacity: v1.ResourceList{
 				// Quotas are supported by the userspace client(ceph-fuse, libcephfs), or kernel client >= 4.17 but only on mimic clusters.
 				// In other cases capacity is meaningless here.
@@ -248,7 +255,7 @@ func (p *cephFSProvisioner) Delete(volume *v1.PersistentVolume) error {
 	if err != nil {
 		return err
 	}
-	cluster, adminID, adminSecret, pvcRoot, mon, _, err := p.parseParameters(class.Parameters)
+	cluster, adminID, adminSecret, pvcRoot, mon, _, disableSignatures, err := p.parseParameters(class.Parameters)
 	if err != nil {
 		return err
 	}
@@ -264,6 +271,9 @@ func (p *cephFSProvisioner) Delete(volume *v1.PersistentVolume) error {
 		"CEPH_VOLUME_ROOT=" + pvcRoot}
 	if *disableCephNamespaceIsolation {
 		cmd.Env = append(cmd.Env, "CEPH_NAMESPACE_ISOLATION_DISABLED=true")
+	}
+	if disableSignatures {
+		cmd.Env = append(cmd.Env, "CEPHX_NO_SIGN=true")
 	}
 
 	output, cmdErr := cmd.CombinedOutput()
@@ -287,12 +297,12 @@ func (p *cephFSProvisioner) Delete(volume *v1.PersistentVolume) error {
 	return nil
 }
 
-func (p *cephFSProvisioner) parseParameters(parameters map[string]string) (string, string, string, string, []string, bool, error) {
+func (p *cephFSProvisioner) parseParameters(parameters map[string]string) (string, string, string, string, []string, bool, bool, error) {
 	var (
 		err                                                                           error
 		mon                                                                           []string
 		cluster, adminID, adminSecretName, adminSecretNamespace, adminSecret, pvcRoot string
-		deterministicNames                                                            bool
+		deterministicNames, disableSignatures                                         bool
 	)
 
 	adminSecretNamespace = "default"
@@ -300,6 +310,7 @@ func (p *cephFSProvisioner) parseParameters(parameters map[string]string) (strin
 	cluster = "ceph"
 	pvcRoot = "/volumes/kubernetes"
 	deterministicNames = false
+	disableSignatures = false
 
 	for k, v := range parameters {
 		switch strings.ToLower(k) {
@@ -341,21 +352,24 @@ func (p *cephFSProvisioner) parseParameters(parameters map[string]string) (strin
 		case "deterministicnames":
 			// On error, strconv.ParseBool() returns false; leave that, as it is a perfectly fine default
 			deterministicNames, _ = strconv.ParseBool(v)
+		case "disablesignatures":
+			// On error, strconv.ParseBool() returns false; leave that, as it is a perfectly fine default
+			disableSignatures, _ = strconv.ParseBool(v)
 		default:
-			return "", "", "", "", nil, false, fmt.Errorf("invalid option %q", k)
+			return "", "", "", "", nil, false, false, fmt.Errorf("invalid option %q", k)
 		}
 	}
 	// sanity check
 	if adminSecretName == "" {
-		return "", "", "", "", nil, false, fmt.Errorf("missing Ceph admin secret name")
+		return "", "", "", "", nil, false, false, fmt.Errorf("missing Ceph admin secret name")
 	}
 	if adminSecret, err = p.parsePVSecret(adminSecretNamespace, adminSecretName); err != nil {
-		return "", "", "", "", nil, false, fmt.Errorf("failed to get admin secret from [%q/%q]: %v", adminSecretNamespace, adminSecretName, err)
+		return "", "", "", "", nil, false, false, fmt.Errorf("failed to get admin secret from [%q/%q]: %v", adminSecretNamespace, adminSecretName, err)
 	}
 	if len(mon) < 1 {
-		return "", "", "", "", nil, false, fmt.Errorf("missing Ceph monitors")
+		return "", "", "", "", nil, false, false, fmt.Errorf("missing Ceph monitors")
 	}
-	return cluster, adminID, adminSecret, pvcRoot, mon, deterministicNames, nil
+	return cluster, adminID, adminSecret, pvcRoot, mon, deterministicNames, disableSignatures, nil
 }
 
 func (p *cephFSProvisioner) parsePVSecret(namespace, secretName string) (string, error) {

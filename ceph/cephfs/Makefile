@@ -12,16 +12,11 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-ifeq ($(REGISTRY),)
-	REGISTRY = quay.io/external_storage/
-endif
-
-ifeq ($(VERSION),)
-	VERSION = latest
-endif
-
-IMAGE = $(REGISTRY)cephfs-provisioner:$(VERSION)
-MUTABLE_IMAGE = $(REGISTRY)cephfs-provisioner:latest
+REGISTRY := quay.io/external_storage/
+VERSION := latest
+CEPH_VERSION := mimic
+IMAGE := $(REGISTRY)cephfs-provisioner:$(VERSION)
+MUTABLE_IMAGE := $(REGISTRY)cephfs-provisioner:latest
 
 all build:
 	CGO_ENABLED=0 GOOS=linux go build -a -ldflags '-extldflags "-static"' -o cephfs-provisioner cephfs-provisioner.go
@@ -31,7 +26,7 @@ container: build quick-container
 .PHONY: container
 
 quick-container:
-	docker build -t $(MUTABLE_IMAGE) .
+	docker build --build-arg=CEPH_VERSION=$(CEPH_VERSION) -t $(MUTABLE_IMAGE) .
 	docker tag $(MUTABLE_IMAGE) $(IMAGE)
 .PHONY: quick-container
 
